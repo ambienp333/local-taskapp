@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tasks</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="left-panel">
+        <div id="clock"></div>
+        <div id="view-label"></div>
+        <div id="task-list"><div class="task-inner"></div></div>
+        <div id="add-bar" class="hidden">
+            <input type="text" id="task-input" autocomplete="off" spellcheck="false"
+                   placeholder="task name  mod1 mod2">
+        </div>
+    </div>
+
+    <div id="right-panel">
+        <div id="screen-notes" class="panel-screen active">
+            <textarea id="notes-area" placeholder="select a task" disabled></textarea>
+        </div>
+        <div id="screen-hotkeys" class="panel-screen"></div>
+    </div>
+
+    <!-- Narrow-screen notes overlay -->
+    <div id="notes-overlay" class="hidden">
+        <textarea id="notes-overlay-input" placeholder="notes..."></textarea>
+        <div class="notes-overlay-btns">
+            <button id="save-notes-btn">save</button>
+            <button id="close-notes-btn">close</button>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

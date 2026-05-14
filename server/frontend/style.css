@@ -1,0 +1,237 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    display: flex;
+    background-color: #1e1e1f;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+    transition: background-color 300ms ease;
+}
+
+body.daily { background-color: #251e21; }
+
+/* ---- Left panel ---- */
+
+#left-panel {
+    flex: 0 0 33.333vw;
+    min-width: 33.333vw;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid rgba(255,255,255,0.08);
+}
+
+#clock {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    font-size: 18px;
+    color: rgba(255,255,255,0.5);
+    z-index: 10;
+    pointer-events: none;
+}
+
+#view-label {
+    position: absolute;
+    top: 45px;
+    left: 20px;
+    font-size: 18px;
+    color: rgba(255,255,255,0.5);
+    z-index: 10;
+    pointer-events: none;
+}
+
+#task-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 90px 20px 60px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.task-inner {
+    width: 100%;
+    max-width: 480px;
+}
+
+.task {
+    padding: 10px 12px 10px 14px;
+    margin: 5px 0;
+    border-radius: 6px;
+    font-size: 15px;
+    line-height: 1.5;
+    cursor: pointer;
+    transition: background-color 0.15s;
+    border-left: 2px solid transparent;
+}
+
+.task:hover { background-color: rgba(255,255,255,0.05); }
+
+.task.selected {
+    background-color: rgba(255,255,255,0.08);
+    border-left-color: rgba(255,255,255,0.25);
+}
+
+.task.dragging  { opacity: 0.35; }
+.task.drag-over { border-top: 2px solid rgba(255,255,255,0.35); }
+
+.task.ur { color: #e57373; }
+.task.ac { color: #ffb74d; }
+.task.he { color: #81c784; }
+.task.so { color: #b39ddb; }
+.task.co { color: #64b5f6; }
+.task.mi { color: #d4d4d4; }
+
+#add-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 14px 20px;
+    background: #2a2a2b;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+#task-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 15px;
+}
+
+/* ---- Right panel ---- */
+
+#right-panel {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+
+.panel-screen {
+    display: none;
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    padding: 40px 36px;
+}
+
+.panel-screen.active { display: block; }
+
+#notes-area {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.8;
+    resize: none;
+}
+
+#notes-area:disabled {
+    opacity: 0.2;
+    cursor: default;
+}
+
+/* Hotkeys screen */
+
+.hotkeys-content { color: #d4d4d4; }
+
+.hk-section { margin-bottom: 28px; }
+
+.hk-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: rgba(255,255,255,0.3);
+    margin-bottom: 12px;
+}
+
+.hk-row {
+    display: flex;
+    gap: 20px;
+    padding: 4px 0;
+    font-size: 13px;
+}
+
+.hk-key {
+    min-width: 170px;
+    color: rgba(255,255,255,0.45);
+}
+
+.hk-key.ur { color: #e57373; }
+.hk-key.ac { color: #ffb74d; }
+.hk-key.he { color: #81c784; }
+.hk-key.so { color: #b39ddb; }
+.hk-key.co { color: #64b5f6; }
+.hk-key.mi { color: #d4d4d4; }
+
+/* ---- Narrow-screen notes overlay ---- */
+
+#notes-overlay {
+    position: fixed;
+    bottom: 60px;
+    left: 20px;
+    width: 260px;
+    background: #2a2a2b;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    padding: 10px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#notes-overlay-input {
+    width: 100%;
+    height: 100px;
+    background: #1e1e1f;
+    border: none;
+    border-radius: 4px;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+    padding: 8px;
+    resize: none;
+    outline: none;
+}
+
+.notes-overlay-btns {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.notes-overlay-btns button {
+    background: #444;
+    border: none;
+    border-radius: 4px;
+    color: #d4d4d4;
+    cursor: pointer;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    padding: 4px 10px;
+}
+
+/* ---- Responsive ---- */
+
+@media (max-width: 900px) {
+    #right-panel { display: none; }
+    #left-panel {
+        flex: 0 0 100vw;
+        min-width: 100vw;
+        border-right: none;
+    }
+}
+
+.hidden { display: none !important; }

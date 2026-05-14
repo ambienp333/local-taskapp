@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+active/*.md
+journal/*.md
+flashcards/**/*.md
