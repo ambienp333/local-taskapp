@@ -17,13 +17,13 @@ def _push_async(task):
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _push_delete_async(task_id):
+def _push_completion_async(task, date_slug):
     def _run():
         try:
             import sync_routes
-            sync_routes.push_delete(task_id)
+            sync_routes.push_completion(task, date_slug)
         except Exception as e:
-            print(f'[sync] delete push failed: {e}')
+            print(f'[sync] completion push failed: {e}')
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -190,9 +190,13 @@ def register(app):
             return jsonify({'error': 'id required'}), 400
 
         temp, daily = store.get_all_tasks()
+        task = next((t for t in temp + daily if t['id'] == task_id), None)
         store.write_tasks(config.TEMP_FILE,  [t for t in temp  if t['id'] != task_id])
         store.write_tasks(config.DAILY_FILE, [t for t in daily if t['id'] != task_id])
-        _push_delete_async(task_id)
+        if task:
+            now       = datetime.now()
+            date_slug = f"{now.month}-{now.day}-{str(now.year)[2:]}"
+            _push_completion_async(task, date_slug)
         return '', 204
 
     @app.route('/api/tasks/reorder', methods=['POST'])

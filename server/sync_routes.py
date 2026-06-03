@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import keyring
 import config
 import store
+import journal_routes
 
 USER_ID        = 'abel_main_user'
 KEYRING_SVC    = 'taskapp'
@@ -89,9 +90,34 @@ def _date_from_id(task_id):
 
 # ---- Core sync ----
 
-def push_delete(task_id):
-    task = {'id': task_id, 'name': '', 'modifiers': ['deleted'], 'notes': ''}
-    push_task(task)
+def push_completion(task, date_slug):
+    """Push a completion event. date_slug format: M-D-YY"""
+    block     = f'COMPLETION\n{date_slug}\n{task_to_block(task)}'
+    nonce_hex, ct_hex = encrypt_payload(block)
+    task_id   = task['id']
+    machine   = config.MACHINE_ID
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO public.sync_temp_ledger
+                    (user_id, task_id, machine_id, payload, nonce, sent_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (user_id, task_id) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    nonce   = EXCLUDED.nonce,
+                    sent_at = NOW()
+            """, (USER_ID, task_id, machine, ct_hex, nonce_hex))
+            cur.execute("""
+                INSERT INTO public.sync_permanent_ledger
+                    (user_id, task_id, machine_id, task_date, log_number, sent_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (user_id, task_id) DO NOTHING
+            """, (USER_ID, task_id, machine, _date_from_id(task_id), _log_number_from_id(task_id)))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def push_task(task):
@@ -138,24 +164,40 @@ def _apply_incoming(rows):
     for row in rows:
         nonce_hex = row.get('nonce')
         try:
-            if nonce_hex:
-                plaintext = decrypt_payload(row['payload'], nonce_hex)
-            else:
-                plaintext = row['payload']
+            plaintext = decrypt_payload(row['payload'], nonce_hex) if nonce_hex else row['payload']
         except Exception as e:
             print(f'[sync] decrypt failed for {row["task_id"]}: {e}')
             continue
 
-        task = store._parse_block(plaintext.split('\n'))
-        if not task:
+        lines = plaintext.split('\n')
+
+        if lines[0] == 'COMPLETION' and len(lines) >= 3:
+            date_slug = lines[1].strip()
+            task      = store._parse_block(lines[2:])
+            if not task:
+                continue
+            new_temp  = [t for t in new_temp  if t['id'] != task['id']]
+            new_daily = [t for t in new_daily if t['id'] != task['id']]
+            existing_ids.discard(task['id'])
+            try:
+                jdata  = journal_routes.load_journal(date_slug)
+                jtasks = jdata.get('tasks', [])
+                if not any(t['id'] == task['id'] for t in jtasks):
+                    jtasks.append({
+                        'id':        task['id'],
+                        'name':      task['name'],
+                        'modifiers': task.get('modifiers', []),
+                        'notes':     task.get('notes', ''),
+                        'completed': True,
+                    })
+                    journal_routes.save_journal(date_slug, {'tasks': jtasks})
+            except Exception as e:
+                print(f'[sync] journal write failed for {task["id"]}: {e}')
+            updated.append(task['id'])
             continue
 
-        if 'deleted' in task.get('modifiers', []):
-            if task['id'] in existing_ids:
-                new_temp  = [t for t in new_temp  if t['id'] != task['id']]
-                new_daily = [t for t in new_daily if t['id'] != task['id']]
-                existing_ids.discard(task['id'])
-                updated.append(task['id'])
+        task = store._parse_block(lines)
+        if not task:
             continue
 
         if task['id'] in existing_ids:
