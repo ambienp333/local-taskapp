@@ -1,7 +1,92 @@
 from flask import request, jsonify
 from datetime import datetime, timedelta
+import threading
+import time
 import store
 import config
+import journal_routes
+
+
+def _push_async(task):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_task(task)
+        except Exception as e:
+            print(f'[sync] push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _push_delete_async(task_id):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_delete(task_id)
+        except Exception as e:
+            print(f'[sync] delete push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fail_at(task):
+    """Returns the datetime at which a da task should auto-fail (4am next day)."""
+    try:
+        date_part = task['id'].split('(')[0]
+        mo, d, y  = date_part.split('/')
+        created   = datetime(2000 + int(y), int(mo), int(d))
+        return created + timedelta(days=1, hours=4)
+    except Exception:
+        return None
+
+
+def _run_auto_fail():
+    while True:
+        time.sleep(5 * 60)
+        try:
+            _do_auto_fail()
+        except Exception as e:
+            print(f'[auto-fail] error: {e}')
+
+
+def _do_auto_fail():
+    _, daily = store.get_all_tasks()
+    now      = datetime.now()
+    failed   = []
+    surviving = []
+
+    for task in daily:
+        if 'fc' in task.get('modifiers', []):
+            surviving.append(task)
+            continue
+        threshold = _fail_at(task)
+        if threshold and now >= threshold:
+            failed.append(task)
+        else:
+            surviving.append(task)
+
+    if not failed:
+        return
+
+    for task in failed:
+        date_part = task['id'].split('(')[0]
+        mo, d, y  = date_part.split('/')
+        date_slug = f"{mo}-{d}-{y}"
+
+        existing  = journal_routes.load_journal(date_slug)
+        jtasks    = existing.get('tasks', [])
+        known_ids = {t['id'] for t in jtasks}
+
+        if task['id'] not in known_ids:
+            jtasks.append({
+                'id':        task['id'],
+                'name':      task['name'] + ' (failed)',
+                'modifiers': task.get('modifiers', []),
+                'notes':     task.get('notes', ''),
+                'completed': True,
+            })
+            journal_routes.save_journal(date_slug, {'tasks': jtasks})
+
+    store.write_tasks(config.DAILY_FILE, surviving)
+    print(f'[auto-fail] failed {len(failed)} task(s)')
 
 
 def is_expired(task):
@@ -20,6 +105,8 @@ def is_expired(task):
 
 
 def register(app):
+    threading.Thread(target=_run_auto_fail, daemon=True).start()
+
     @app.route('/api/tasks', methods=['GET'])
     def get_tasks():
         temp, daily = store.get_all_tasks()
@@ -51,6 +138,7 @@ def register(app):
             temp.append(task)
             store.write_tasks(config.TEMP_FILE, temp)
 
+        _push_async(task)
         return jsonify(task), 201
 
     @app.route('/api/tasks', methods=['PATCH'])
@@ -91,6 +179,7 @@ def register(app):
 
         store.write_tasks(config.TEMP_FILE, temp)
         store.write_tasks(config.DAILY_FILE, daily)
+        _push_async(target)
         return jsonify(target)
 
     @app.route('/api/tasks', methods=['DELETE'])
@@ -103,6 +192,7 @@ def register(app):
         temp, daily = store.get_all_tasks()
         store.write_tasks(config.TEMP_FILE,  [t for t in temp  if t['id'] != task_id])
         store.write_tasks(config.DAILY_FILE, [t for t in daily if t['id'] != task_id])
+        _push_delete_async(task_id)
         return '', 204
 
     @app.route('/api/tasks/reorder', methods=['POST'])

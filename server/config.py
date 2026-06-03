@@ -1,6 +1,6 @@
 import os
 
-MACHINE_ID = "Desktop"
+MACHINE_ID = "Laptop"
 BASE_DIR    = os.path.expanduser("~/Documents/task-app")
 ACTIVE_DIR  = os.path.join(BASE_DIR, "active")
 JOURNAL_DIR = os.path.join(BASE_DIR, "journal")
