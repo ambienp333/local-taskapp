@@ -121,6 +121,8 @@ def push_completion(task, date_slug):
 
 
 def push_task(task):
+    if 'fc' in task.get('modifiers', []):
+        return
     plaintext         = task_to_block(task)
     nonce_hex, ct_hex = encrypt_payload(plaintext)
     task_id           = task['id']

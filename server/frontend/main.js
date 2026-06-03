@@ -95,9 +95,40 @@ async function toggleSubtask(task, rawIdx) {
 
 // ---- API ----
 
+async function syncFcTasks(data) {
+    let fcRes;
+    try { fcRes = await fetch(`${API}/api/flashcards/config`); }
+    catch (e) { return; }
+    if (!fcRes.ok) return;
+    const subjects = await fcRes.json();
+
+    const creates = [];
+    for (const sub of subjects) {
+        const fcTask = [...(data.active || []), ...(data.daily || [])].find(
+            t => t.modifiers.includes('fc') && t.name.toLowerCase().includes(sub.subject.toLowerCase()));
+        if (sub.enabled && !fcTask) {
+            creates.push(sub);
+        } else if (fcTask) {
+            fcTask.name = `${sub.subject}[${sub.today_count}/${sub.daily_goal}]`;
+        }
+    }
+    if (creates.length) {
+        await Promise.all(creates.map(sub => fetch(`${API}/api/tasks`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: `${sub.subject} flashcards`, modifiers: ['da', 'fc'] }),
+        })));
+        const r = await fetch(`${API}/api/tasks`);
+        const fresh = await r.json();
+        Object.assign(data, fresh);
+        await syncFcTasks(data);
+    }
+}
+
 async function loadTasks() {
     const res = await fetch(`${API}/api/tasks`);
     const data = await res.json();
+    await syncFcTasks(data);
     state.tasks = data;
     // Re-sync selectedTask reference after reload
     if (state.selectedTask) {
@@ -106,12 +137,12 @@ async function loadTasks() {
         updateNotesPanel();
     }
     render();
-    // Snapshot active tasks into today's journal
+    // Snapshot active tasks into today's journal (exclude fc tasks)
     const allTasks = [...(data.active || []), ...(data.daily || [])];
     fetch(`${API}/api/journal/${dateToSlug(todayDateStr())}/snapshot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tasks: allTasks.map(t => ({
+        body: JSON.stringify({ tasks: allTasks.filter(t => !t.modifiers.includes('fc')).map(t => ({
             id: t.id, name: t.name, modifiers: t.modifiers, notes: t.notes || '',
         })) }),
     });
@@ -156,7 +187,6 @@ function completeFcTask(subject) {
     if (state.selectedTask?.id === task.id) { state.selectedTask = null; updateNotesPanel(); }
     render();
     fetch(`${API}/api/tasks`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id }) });
-    fetch(`${API}/api/journal/${dateToSlug(todayDateStr())}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id, task: { id: task.id, name: task.name, modifiers: task.modifiers, notes: '' } }) });
 }
 
 async function saveNotes() {
@@ -194,6 +224,12 @@ function render() {
 
         div.addEventListener('click', () => {
             if (dragJustEnded) return;
+            if (task.modifiers.includes('fc')) {
+                if (state.selectedTask) deselectTask();
+                setRightScreen(SCREENS.indexOf('screen-flashcards'));
+                initFlashcardScreen();
+                return;
+            }
             if (state.selectedTask?.id === task.id) {
                 clearTimeout(deselectTimer);
                 if (isNarrow()) {
@@ -471,6 +507,15 @@ document.getElementById('notes-area').addEventListener('focus', () => {
 
 document.getElementById('notes-area').addEventListener('blur', () => {
     if (!isNarrow()) saveNotes();
+});
+
+document.getElementById('notes-area').addEventListener('input', () => {
+    if (!state.selectedTask) return;
+    const notes = document.getElementById('notes-area').value;
+    state.selectedTask.notes = notes;
+    const t = state.tasks[state.view]?.find(t => t.id === state.selectedTask.id);
+    if (t) t.notes = notes;
+    render();
 });
 
 document.getElementById('notes-area').addEventListener('keydown', e => {

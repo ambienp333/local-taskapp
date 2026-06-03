@@ -213,7 +213,7 @@ def register(app):
         task = next((t for t in temp + daily if t['id'] == task_id), None)
         store.write_tasks(config.TEMP_FILE,  [t for t in temp  if t['id'] != task_id])
         store.write_tasks(config.DAILY_FILE, [t for t in daily if t['id'] != task_id])
-        if task:
+        if task and 'fc' not in task.get('modifiers', []):
             now       = datetime.now()
             date_slug = f"{now.month}-{now.day}-{str(now.year)[2:]}"
             _push_completion_async(task, date_slug)
