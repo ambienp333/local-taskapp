@@ -18,8 +18,6 @@ let shiftHoldTimer = null;
 let deselectTimer = null;
 let dragSrcIndex = null;
 let dragJustEnded = false;
-let lastCompleted = null;
-let undoTimer = null;
 
 // ---- Utils ----
 
@@ -100,11 +98,6 @@ async function toggleSubtask(task, rawIdx) {
 async function loadTasks() {
     const res = await fetch(`${API}/api/tasks`);
     const data = await res.json();
-    if (lastCompleted && undoTimer !== null) {
-        const pid = lastCompleted.task.id;
-        if (data.active) data.active = data.active.filter(t => t.id !== pid);
-        if (data.daily) data.daily = data.daily.filter(t => t.id !== pid);
-    }
     state.tasks = data;
     // Re-sync selectedTask reference after reload
     if (state.selectedTask) {
@@ -124,40 +117,13 @@ async function loadTasks() {
     });
 }
 
-function flushPendingDelete() {
-    if (undoTimer === null) return;
-    clearTimeout(undoTimer);
-    undoTimer = null;
-    if (lastCompleted) {
-        const task = lastCompleted.task;
-        fetch(`${API}/api/tasks`, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: task.id }),
-        });
-        fetch(`${API}/api/journal/${dateToSlug(todayDateStr())}/complete`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: task.id, task: {
-                id: task.id, name: task.name, modifiers: task.modifiers, notes: task.notes || '',
-            } }),
-        });
-        lastCompleted = null;
-    }
-}
-
-async function completeTask(task) {
+function completeTask(task) {
     if (task.modifiers.includes('fc')) return;
     const subtasks = getSubtasks(task.notes);
     if (subtasks.some(s => !s.done)) return;
 
-    flushPendingDelete();
-
     const list = state.tasks[state.view];
     const idx = list.findIndex(t => t.id === task.id);
-
-    lastCompleted = { task: { ...task, modifiers: [...task.modifiers] }, idx, view: state.view };
-
     if (idx !== -1) list.splice(idx, 1);
     if (state.selectedTask?.id === task.id) {
         state.selectedTask = null;
@@ -165,17 +131,18 @@ async function completeTask(task) {
     }
     render();
 
-    undoTimer = setTimeout(flushPendingDelete, 10000);
-}
-
-function undoComplete() {
-    if (!lastCompleted || undoTimer === null) return;
-    clearTimeout(undoTimer);
-    undoTimer = null;
-    const { task, idx, view } = lastCompleted;
-    lastCompleted = null;
-    state.tasks[view].splice(idx, 0, task);
-    render();
+    fetch(`${API}/api/tasks`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: task.id }),
+    });
+    fetch(`${API}/api/journal/${dateToSlug(todayDateStr())}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: task.id, task: {
+            id: task.id, name: task.name, modifiers: task.modifiers, notes: task.notes || '',
+        } }),
+    });
 }
 
 function completeFcTask(subject) {
@@ -367,7 +334,6 @@ function buildHotkeysScreen() {
         ['Enter (selected)', 'Focus notes'],
         ['Shift+Enter',      'Complete task'],
         ['Double-click',     'Complete task'],
-        ['Ctrl+Z',           'Undo complete'],
         ['Drag',             'Reorder tasks'],
         ['← →',             'Cycle right panel'],
         ['↑ ↓',             'Cycle tasks'],
@@ -566,13 +532,6 @@ document.addEventListener('keydown', e => {
         if (e.key in ratingKeys) { e.preventDefault(); rateCard(ratingKeys[e.key]); return; }
     }
 
-    // Ctrl+Z → undo last completion
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        e.preventDefault();
-        undoComplete();
-        return;
-    }
-
     // Shift hold → hotkeys (delayed to allow Shift+Enter chord)
     if (e.key === 'Shift' && !e.repeat) {
         shiftHoldTimer = setTimeout(() => {
@@ -682,8 +641,6 @@ document.addEventListener('keyup', e => {
         }
     }
 });
-
-window.addEventListener('beforeunload', flushPendingDelete);
 
 document.addEventListener('mousemove', () => {
     document.body.classList.remove('keyboard-nav');
@@ -852,8 +809,33 @@ function renderJournalTasks(tasks) {
         div.className = `journal-task ${getColorClass(task.modifiers || [])}${task.completed ? ' completed' : ''}`;
 
         const header = document.createElement('div');
-        header.className = 'journal-task-name';
-        header.textContent = (task.completed ? '✓ ' : '') + task.name;
+        header.className = 'journal-task-header';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'journal-task-name';
+        nameSpan.textContent = (task.completed ? '✓ ' : '') + task.name;
+        header.appendChild(nameSpan);
+
+        if (task.completed) {
+            const btn = document.createElement('button');
+            btn.className = 'journal-reinstate-btn';
+            btn.textContent = '↩';
+            btn.title = 'Reinstate to active';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                await fetch(`${API}/api/tasks/reinstate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task: {
+                        id: task.id, name: task.name,
+                        modifiers: task.modifiers || [], notes: task.notes || '',
+                    }}),
+                });
+                await loadTasks();
+            });
+            header.appendChild(btn);
+        }
+
         div.appendChild(header);
 
         if (task.notes && task.notes.trim()) {

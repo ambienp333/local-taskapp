@@ -182,6 +182,26 @@ def register(app):
         _push_async(target)
         return jsonify(target)
 
+    @app.route('/api/tasks/reinstate', methods=['POST'])
+    def reinstate_task():
+        task = request.json.get('task')
+        if not task or not task.get('id'):
+            return jsonify({'error': 'task required'}), 400
+
+        temp, daily = store.get_all_tasks()
+        if any(t['id'] == task['id'] for t in temp + daily):
+            return jsonify({'ok': True})
+
+        if 'da' in task.get('modifiers', []):
+            daily.append(task)
+            store.write_tasks(config.DAILY_FILE, daily)
+        else:
+            temp.append(task)
+            store.write_tasks(config.TEMP_FILE, temp)
+
+        _push_async(task)
+        return jsonify({'ok': True})
+
     @app.route('/api/tasks', methods=['DELETE'])
     def delete_task():
         data = request.json

@@ -322,6 +322,25 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
 
 .journal-task.completed { opacity: 0.4; }
 
+.journal-task-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.journal-reinstate-btn {
+    font-size: 11px;
+    padding: 1px 5px;
+    background: transparent;
+    border: 1px solid #555;
+    color: #888;
+    cursor: pointer;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+.journal-reinstate-btn:hover { color: #81c784; border-color: #81c784; }
+
 .journal-task-notes {
     margin-top: 4px;
     font-size: 12px;
