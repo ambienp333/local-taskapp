@@ -170,6 +170,7 @@ def _apply_incoming(rows):
             continue
 
         lines = plaintext.split('\n')
+        print(f'[sync] row {row["task_id"]} machine={row["machine_id"]} line0={lines[0]!r} nlines={len(lines)}')
 
         if lines[0] == 'COMPLETION' and len(lines) >= 3:
             date_slug = lines[1].strip()
