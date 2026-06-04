@@ -226,6 +226,73 @@ def _apply_incoming(rows):
     return {'added': added, 'updated': updated}
 
 
+def push_journal(date_slug, data):
+    import json
+    plaintext         = json.dumps(data, ensure_ascii=False)
+    nonce_hex, ct_hex = encrypt_payload(plaintext)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO public.sync_journal_ledger
+                    (user_id, date_slug, machine_id, payload, nonce, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (user_id, date_slug, machine_id) DO UPDATE SET
+                    payload    = EXCLUDED.payload,
+                    nonce      = EXCLUDED.nonce,
+                    updated_at = NOW()
+            """, (USER_ID, date_slug, config.MACHINE_ID, ct_hex, nonce_hex))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _merge_journal(local, remote):
+    by_id = {t['id']: dict(t) for t in local.get('tasks', [])}
+    for t in remote.get('tasks', []):
+        if t['id'] in by_id:
+            if t.get('completed'):
+                by_id[t['id']]['completed'] = True
+            if not by_id[t['id']].get('notes') and t.get('notes'):
+                by_id[t['id']]['notes'] = t['notes']
+        else:
+            by_id[t['id']] = dict(t)
+    return {'tasks': list(by_id.values())}
+
+
+def _sync_journals():
+    import json
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT date_slug, payload, nonce FROM public.sync_journal_ledger
+                WHERE user_id = %s AND machine_id != %s
+            """, (USER_ID, config.MACHINE_ID))
+            rows = list(cur.fetchall())
+    finally:
+        conn.close()
+
+    for row in rows:
+        try:
+            plaintext   = decrypt_payload(row['payload'], row['nonce'])
+            remote_data = json.loads(plaintext)
+        except Exception as e:
+            print(f'[sync] journal decrypt failed for {row["date_slug"]}: {e}')
+            continue
+
+        date_slug  = row['date_slug']
+        local_data = journal_routes.load_journal(date_slug)
+        merged     = _merge_journal(local_data, remote_data)
+
+        if merged['tasks'] != local_data.get('tasks', []):
+            journal_routes.save_journal(date_slug, merged)
+            try:
+                push_journal(date_slug, merged)
+            except Exception as e:
+                print(f'[sync] journal push-back failed for {date_slug}: {e}')
+
+
 def do_sync():
     conn = get_conn()
     try:
@@ -236,25 +303,31 @@ def do_sync():
             """, (USER_ID, config.MACHINE_ID))
             rows = list(cur.fetchall())
 
-        if not rows:
-            return {'synced': 0, 'skipped': 0}
+        task_result = {'synced': 0, 'skipped': 0}
+        if rows:
+            result    = _apply_incoming(rows)
+            added_ids = result['added']
+            upd_ids   = result['updated']
 
-        result    = _apply_incoming(rows)
-        added_ids = result['added']
-        upd_ids   = result['updated']
+            task_ids = [r['task_id'] for r in rows]
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM public.sync_temp_ledger
+                    WHERE user_id = %s AND task_id = ANY(%s) AND machine_id != %s
+                """, (USER_ID, task_ids, config.MACHINE_ID))
+            conn.commit()
 
-        task_ids = [r['task_id'] for r in rows]
-        with conn.cursor() as cur:
-            cur.execute("""
-                DELETE FROM public.sync_temp_ledger
-                WHERE user_id = %s AND task_id = ANY(%s) AND machine_id != %s
-            """, (USER_ID, task_ids, config.MACHINE_ID))
-        conn.commit()
-
-        total_changed = len(added_ids) + len(upd_ids)
-        return {'synced': total_changed, 'skipped': len(rows) - total_changed}
+            total_changed = len(added_ids) + len(upd_ids)
+            task_result = {'synced': total_changed, 'skipped': len(rows) - total_changed}
     finally:
         conn.close()
+
+    try:
+        _sync_journals()
+    except Exception as e:
+        print(f'[sync] journal sync failed: {e}')
+
+    return task_result
 
 
 def _bg_loop():

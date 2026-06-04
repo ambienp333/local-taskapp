@@ -84,6 +84,11 @@ def _do_auto_fail():
                 'completed': True,
             })
             journal_routes.save_journal(date_slug, {'tasks': jtasks})
+            try:
+                import sync_routes
+                sync_routes.push_journal(date_slug, {'tasks': jtasks})
+            except Exception as e:
+                print(f'[sync] auto-fail journal push failed: {e}')
 
     store.write_tasks(config.DAILY_FILE, surviving)
     print(f'[auto-fail] failed {len(failed)} task(s)')

@@ -1,9 +1,20 @@
 import os
 import json
+import threading
 from flask import request, jsonify
 from datetime import datetime
 import config
 import store
+
+
+def _push_journal_async(date_slug, data):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_journal(date_slug, data)
+        except Exception as e:
+            print(f'[sync] journal push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def load_journal(date_slug):
@@ -91,6 +102,7 @@ def register(app):
                 merged.append(t)
 
         save_journal(date, {'tasks': merged})
+        _push_journal_async(date, {'tasks': merged})
         return jsonify({'ok': True})
 
     @app.route('/api/journal/<date>/complete', methods=['POST'])
@@ -121,6 +133,7 @@ def register(app):
             })
 
         save_journal(date, {'tasks': tasks})
+        _push_journal_async(date, {'tasks': tasks})
         return jsonify({'ok': True})
 
     @app.route('/api/journal/<date>', methods=['GET'])
