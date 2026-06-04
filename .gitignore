@@ -3,5 +3,7 @@ __pycache__/
 *.pyo
 .env
 active/*.md
-journal/*.md
+journal/*.json
 flashcards/**/*.md
+flashcards/reviews.json
+flashcards/config.json

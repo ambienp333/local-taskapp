@@ -1,0 +1,36 @@
+taskapp.service — systemd user service setup
+=============================================
+
+This file auto-starts the task-app server at login via systemd.
+It calls start.sh, which boots a private Tor instance and runs
+the server through it. Install it once per machine.
+
+
+PREREQUISITES (one-time, requires sudo)
+----------------------------------------
+sudo dnf install -y tor torsocks
+
+
+INSTALL THE SERVICE (one-time per machine)
+-------------------------------------------
+mkdir -p ~/.config/systemd/user
+cp taskapp.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now taskapp
+
+
+USEFUL COMMANDS
+----------------
+Check status:   systemctl --user status taskapp
+View logs:      journalctl --user -u taskapp -f
+Stop:           systemctl --user stop taskapp
+Restart:        systemctl --user restart taskapp
+
+
+NOTES
+------
+- The service file lives in the repo root alongside start.sh
+- start.sh handles Tor startup — do not call python server/server.py directly
+- Tor runs as a private subprocess (port 9150), not a system daemon
+- All Supabase connections are routed through Tor automatically
+- On startup, logs will show "[start] Tor ready" when ready

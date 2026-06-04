@@ -95,26 +95,11 @@ def push_completion(task, date_slug):
     block     = f'COMPLETION\n{date_slug}\n{task_to_block(task)}'
     nonce_hex, ct_hex = encrypt_payload(block)
     task_id   = task['id']
-    machine   = config.MACHINE_ID
-
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO public.sync_temp_ledger
-                    (user_id, task_id, machine_id, payload, nonce, sent_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (user_id, task_id) DO UPDATE SET
-                    payload = EXCLUDED.payload,
-                    nonce   = EXCLUDED.nonce,
-                    sent_at = NOW()
-            """, (USER_ID, task_id, machine, ct_hex, nonce_hex))
-            cur.execute("""
-                INSERT INTO public.sync_permanent_ledger
-                    (user_id, task_id, machine_id, task_date, log_number, sent_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (user_id, task_id) DO NOTHING
-            """, (USER_ID, task_id, machine, _date_from_id(task_id), _log_number_from_id(task_id)))
+            _ledger_upsert(cur, task_id, ct_hex, nonce_hex,
+                           _date_from_id(task_id), _log_number_from_id(task_id))
         conn.commit()
     finally:
         conn.close()
@@ -123,30 +108,73 @@ def push_completion(task, date_slug):
 def push_task(task):
     if 'fc' in task.get('modifiers', []):
         return
-    plaintext         = task_to_block(task)
-    nonce_hex, ct_hex = encrypt_payload(plaintext)
-    task_id           = task['id']
-    machine           = config.MACHINE_ID
-
+    nonce_hex, ct_hex = encrypt_payload(task_to_block(task))
+    task_id = task['id']
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO public.sync_temp_ledger
-                    (user_id, task_id, machine_id, payload, nonce, sent_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (user_id, task_id) DO UPDATE SET
-                    payload = EXCLUDED.payload,
-                    nonce   = EXCLUDED.nonce,
-                    sent_at = NOW()
-            """, (USER_ID, task_id, machine, ct_hex, nonce_hex))
+            _ledger_upsert(cur, task_id, ct_hex, nonce_hex,
+                           _date_from_id(task_id), _log_number_from_id(task_id))
+        conn.commit()
+    finally:
+        conn.close()
 
-            cur.execute("""
-                INSERT INTO public.sync_permanent_ledger
-                    (user_id, task_id, machine_id, task_date, log_number, sent_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (user_id, task_id) DO NOTHING
-            """, (USER_ID, task_id, machine, _date_from_id(task_id), _log_number_from_id(task_id)))
+
+def _ledger_upsert(cur, task_id, ct_hex, nonce_hex, task_date='', log_number=0):
+    cur.execute("""
+        INSERT INTO public.sync_temp_ledger
+            (user_id, task_id, machine_id, payload, nonce, sent_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (user_id, task_id) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            nonce   = EXCLUDED.nonce,
+            sent_at = NOW()
+    """, (USER_ID, task_id, config.MACHINE_ID, ct_hex, nonce_hex))
+    cur.execute("""
+        INSERT INTO public.sync_permanent_ledger
+            (user_id, task_id, machine_id, task_date, log_number, sent_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (user_id, task_id) DO NOTHING
+    """, (USER_ID, task_id, config.MACHINE_ID, task_date, log_number))
+
+
+def push_fc_review(card_id, record):
+    payload = (
+        f'FC_REVIEW\n{card_id}\n{record["subject"]}\n{record["interval"]}\n'
+        f'{record["ease_factor"]}\n{record["reps"]}\n{record["due_date"]}\n'
+        f'{record["seen"]}\n{record["reviewed_at"]}'
+    )
+    nonce_hex, ct_hex = encrypt_payload(payload)
+    task_date = (record.get('reviewed_at') or '')[:10]
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ledger_upsert(cur, f'fc_review:{card_id}', ct_hex, nonce_hex, task_date)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def push_fc_file(subject, filename, content):
+    payload   = f'FC_FILE\n{subject}\n{filename}\n{content}'
+    nonce_hex, ct_hex = encrypt_payload(payload)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ledger_upsert(cur, f'fc_file:{subject}:{filename}', ct_hex, nonce_hex)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def push_fc_config(subject, cfg):
+    import json as _json
+    payload   = f'FC_CONFIG\n{subject}\n{_json.dumps(cfg)}'
+    nonce_hex, ct_hex = encrypt_payload(payload)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ledger_upsert(cur, f'fc_config:{subject}', ct_hex, nonce_hex)
         conn.commit()
     finally:
         conn.close()
@@ -173,6 +201,57 @@ def _apply_incoming(rows):
 
         lines = plaintext.split('\n')
         print(f'[sync] row {row["task_id"]} machine={row["machine_id"]} line0={lines[0]!r} nlines={len(lines)}')
+
+        if lines[0] == 'FC_REVIEW' and len(lines) >= 9:
+            try:
+                import flashcard_routes as _fc
+                card_id = lines[1]
+                record  = {
+                    'subject':     lines[2],
+                    'interval':    int(lines[3]),
+                    'ease_factor': float(lines[4]),
+                    'reps':        int(lines[5]),
+                    'due_date':    lines[6],
+                    'seen':        int(lines[7]),
+                    'reviewed_at': lines[8],
+                }
+                reviews  = _fc.load_reviews()
+                existing = reviews.get(card_id)
+                if not existing or record['reviewed_at'] > existing.get('reviewed_at', ''):
+                    reviews[card_id] = record
+                    _fc.save_reviews(reviews)
+            except Exception as e:
+                print(f'[sync] FC_REVIEW apply failed: {e}')
+            updated.append(row['task_id'])
+            continue
+
+        if lines[0] == 'FC_FILE' and len(lines) >= 3:
+            try:
+                import flashcard_routes as _fc
+                subject  = lines[1]
+                filename = lines[2]
+                content  = '\n'.join(lines[3:])
+                subj_dir = os.path.join(config.FC_DIR, subject)
+                os.makedirs(subj_dir, exist_ok=True)
+                with open(os.path.join(subj_dir, filename), 'w') as _f:
+                    _f.write(content)
+            except Exception as e:
+                print(f'[sync] FC_FILE apply failed: {e}')
+            added.append(row['task_id'])
+            continue
+
+        if lines[0] == 'FC_CONFIG' and len(lines) >= 3:
+            try:
+                import json as _json, flashcard_routes as _fc
+                subject  = lines[1]
+                incoming = _json.loads(lines[2])
+                cfg      = _fc.load_fc_config()
+                cfg[subject] = incoming
+                _fc.save_fc_config(cfg)
+            except Exception as e:
+                print(f'[sync] FC_CONFIG apply failed: {e}')
+            updated.append(row['task_id'])
+            continue
 
         if lines[0] == 'COMPLETION' and len(lines) >= 3:
             date_slug = lines[1].strip()
@@ -330,7 +409,15 @@ def do_sync():
     return task_result
 
 
+def _check_tor():
+    if os.environ.get('TORSOCKS_CONF_FILE'):
+        print('[sync] Tor routing active via torsocks')
+    else:
+        print('[sync] WARNING: not running via start.sh — Supabase connections are NOT anonymised')
+
+
 def _bg_loop():
+    _check_tor()
     try:
         do_sync()
     except Exception as e:

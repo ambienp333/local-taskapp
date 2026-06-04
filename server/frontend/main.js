@@ -103,10 +103,12 @@ async function syncFcTasks(data) {
     catch (e) { return; }
     if (!fcRes.ok) return;
     const subjects = await fcRes.json();
+    const subjectNames = subjects.map(s => s.subject.toLowerCase());
 
+    const allTasks = [...(data.active || []), ...(data.daily || [])];
     const creates = [];
     for (const sub of subjects) {
-        const fcTask = [...(data.active || []), ...(data.daily || [])].find(
+        const fcTask = allTasks.find(
             t => t.modifiers.includes('fc') && t.name.toLowerCase().includes(sub.subject.toLowerCase()));
         if (sub.enabled && !fcTask) {
             creates.push(sub);
@@ -114,16 +116,29 @@ async function syncFcTasks(data) {
             fcTask.name = `${sub.subject}[${sub.today_count}/${sub.daily_goal}]`;
         }
     }
-    if (creates.length) {
-        await Promise.all(creates.map(sub => fetch(`${API}/api/tasks`, {
+
+    // Remove fc placeholder tasks whose subject no longer exists
+    const stale = allTasks.filter(
+        t => t.modifiers.includes('fc') && !subjectNames.some(n => t.name.toLowerCase().includes(n)));
+
+    const ops = [
+        ...stale.map(t => fetch(`${API}/api/tasks`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: t.id }),
+        })),
+        ...creates.map(sub => fetch(`${API}/api/tasks`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: `${sub.subject} flashcards`, modifiers: ['da', 'fc'] }),
-        })));
+        })),
+    ];
+
+    if (ops.length) {
+        await Promise.all(ops);
         const r = await fetch(`${API}/api/tasks`);
         const fresh = await r.json();
         Object.assign(data, fresh);
-        await syncFcTasks(data);
     }
 }
 
@@ -374,6 +389,10 @@ function setRightScreen(index) {
         el.classList.toggle('active', i === index);
     });
     state.rightScreen = index;
+    if (isNarrow()) {
+        document.getElementById('right-panel').classList.toggle(
+            'fc-narrow-active', SCREENS[index] === 'screen-flashcards');
+    }
     if (SCREENS[index] === 'screen-journal')     initJournalScreen();
     if (SCREENS[index] === 'screen-flashcards') initFlashcardScreen();
 }
@@ -593,8 +612,8 @@ document.addEventListener('keydown', e => {
         if (e.key in ratingKeys) { e.preventDefault(); rateCard(ratingKeys[e.key]); return; }
     }
 
-    // Shift hold → hotkeys (delayed to allow Shift+Enter chord)
-    if (e.key === 'Shift' && !e.repeat) {
+    // Shift hold → hotkeys (disabled when flashcard screen is active)
+    if (e.key === 'Shift' && !e.repeat && SCREENS[state.rightScreen] !== 'screen-flashcards') {
         shiftHoldTimer = setTimeout(() => {
             state.prevRightScreen = state.rightScreen;
             state.shiftHoldActive = true;
@@ -1008,6 +1027,11 @@ function initFlashcardScreen() {
 function buildFlashcardScreen() {
     const screen = document.getElementById('screen-flashcards');
     screen.innerHTML = `
+        <button id="fc-narrow-close">×</button>
+        <div id="fc-sync-bar">
+            <button id="fc-resend-btn" title="Push all flashcard data to sync ledger">↺</button>
+            <span id="fc-resend-status"></span>
+        </div>
         <div id="fc-config"></div>
         <div id="fc-review" class="hidden">
             <div id="fc-review-header">
@@ -1023,6 +1047,26 @@ function buildFlashcardScreen() {
         </div>
     `;
 
+    document.getElementById('fc-resend-btn').addEventListener('click', async () => {
+        const btn    = document.getElementById('fc-resend-btn');
+        const status = document.getElementById('fc-resend-status');
+        btn.disabled = true;
+        status.textContent = '...';
+        try {
+            const res  = await fetch(`${API}/api/flashcards/resend`, { method: 'POST' });
+            const data = await res.json();
+            status.textContent = `sent ${data.files}f ${data.reviews}r ${data.config}c`;
+        } catch (e) {
+            status.textContent = 'error';
+        }
+        btn.disabled = false;
+        setTimeout(() => { status.textContent = ''; }, 4000);
+    });
+
+    document.getElementById('fc-narrow-close').addEventListener('click', () => {
+        document.getElementById('right-panel').classList.remove('fc-narrow-active');
+        if (fcState.mode === 'review') exitFcReview();
+    });
     document.getElementById('fc-exit-review').addEventListener('click', exitFcReview);
     document.querySelectorAll('.fc-rate-btn').forEach(btn => {
         btn.addEventListener('click', () => rateCard(parseInt(btn.dataset.rating)));
@@ -1098,6 +1142,49 @@ function renderFcConfig(subjects) {
         const nameSpan = document.createElement('span');
         nameSpan.className = 'fc-subject-name';
         nameSpan.textContent = sub.subject;
+        nameSpan.addEventListener('click', () => {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'fc-subject-rename-input';
+            input.value = sub.subject;
+            nameSpan.replaceWith(input);
+            input.focus();
+            input.select();
+
+            let cancelled = false;
+            const doRename = async () => {
+                if (cancelled) return;
+                const newName = input.value.trim();
+                if (!newName || newName === sub.subject) { input.replaceWith(nameSpan); return; }
+                const res = await fetch(`${API}/api/flashcards/subjects/${encodeURIComponent(sub.subject)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    alert(err.error || 'Invalid name');
+                    input.replaceWith(nameSpan);
+                    return;
+                }
+                const fcTask = [...(state.tasks.active || []), ...(state.tasks.daily || [])].find(
+                    t => t.modifiers.includes('fc') && t.name.toLowerCase().includes(sub.subject.toLowerCase()));
+                if (fcTask) {
+                    await fetch(`${API}/api/tasks`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: fcTask.id, name: `${newName} flashcards` }),
+                    });
+                    await loadTasks();
+                }
+                loadFcConfig();
+            };
+            input.addEventListener('blur', doRename);
+            input.addEventListener('keydown', e => {
+                if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+                if (e.key === 'Escape') { cancelled = true; input.replaceWith(nameSpan); }
+            });
+        });
 
         const countWrap = document.createElement('span');
         countWrap.className = 'fc-subject-count';
@@ -1126,10 +1213,32 @@ function renderFcConfig(subjects) {
         reviewBtn.dataset.subject = sub.subject;
         reviewBtn.addEventListener('click', () => startFcReview(sub.subject, sub.today_count, sub.daily_goal));
 
+        const delBtn = document.createElement('button');
+        delBtn.className = 'fc-subject-del';
+        delBtn.textContent = '×';
+        delBtn.title = 'Delete subject';
+        delBtn.addEventListener('click', async () => {
+            if (!confirm(`Delete "${sub.subject}" and all its data?`)) return;
+            delBtn.disabled = true;
+            const fcTask = [...(state.tasks.active || []), ...(state.tasks.daily || [])].find(
+                t => t.modifiers.includes('fc') && t.name.toLowerCase().includes(sub.subject.toLowerCase()));
+            if (fcTask) {
+                await fetch(`${API}/api/tasks`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: fcTask.id }),
+                });
+            }
+            await fetch(`${API}/api/flashcards/subjects/${encodeURIComponent(sub.subject)}`, { method: 'DELETE' });
+            await loadTasks();
+            loadFcConfig();
+        });
+
         header.appendChild(enabledCb);
         header.appendChild(nameSpan);
         header.appendChild(countWrap);
         header.appendChild(reviewBtn);
+        header.appendChild(delBtn);
         div.appendChild(header);
 
         // File list
@@ -1171,8 +1280,14 @@ function renderFcConfig(subjects) {
                     loadFcConfig();
                 });
 
+                const addBtn = document.createElement('button');
+                addBtn.className = 'fc-file-add';
+                addBtn.textContent = '+';
+                addBtn.title = 'Add card';
+
                 row.appendChild(lbl);
                 row.appendChild(editBtn);
+                row.appendChild(addBtn);
                 row.appendChild(del);
                 fileList.appendChild(row);
 
@@ -1208,11 +1323,82 @@ function renderFcConfig(subjects) {
                 editArea.appendChild(editBtns);
                 fileList.appendChild(editArea);
 
+                // Add card area
+                const addArea = document.createElement('div');
+                addArea.className = 'fc-add-card-area hidden';
+
+                const frontInput = document.createElement('input');
+                frontInput.type = 'text';
+                frontInput.className = 'fc-card-input';
+                frontInput.placeholder = 'front (question)';
+                frontInput.spellcheck = false;
+
+                const backInput = document.createElement('input');
+                backInput.type = 'text';
+                backInput.className = 'fc-card-input';
+                backInput.placeholder = 'back (answer)';
+                backInput.spellcheck = false;
+
+                const addCardBtns = document.createElement('div');
+                addCardBtns.className = 'fc-edit-btns';
+
+                const submitCardBtn = document.createElement('button');
+                submitCardBtn.textContent = 'add';
+                const cancelCardBtn = document.createElement('button');
+                cancelCardBtn.textContent = 'cancel';
+
+                const doAddCard = async () => {
+                    const front = frontInput.value.trim();
+                    if (!front) return;
+                    submitCardBtn.disabled = true;
+                    const res = await fetch(`${API}/api/flashcards/card`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subject: sub.subject, filename: f.filename, front, back: backInput.value.trim() }),
+                    });
+                    submitCardBtn.disabled = false;
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        alert(err.error || 'Failed to add card');
+                        return;
+                    }
+                    frontInput.value = '';
+                    backInput.value = '';
+                    frontInput.focus();
+                };
+
+                frontInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); backInput.focus(); } });
+                backInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doAddCard(); } });
+                submitCardBtn.addEventListener('click', doAddCard);
+                cancelCardBtn.addEventListener('click', () => {
+                    addArea.classList.add('hidden');
+                    frontInput.value = '';
+                    backInput.value = '';
+                });
+
+                addCardBtns.appendChild(submitCardBtn);
+                addCardBtns.appendChild(cancelCardBtn);
+                addArea.appendChild(frontInput);
+                addArea.appendChild(backInput);
+                addArea.appendChild(addCardBtns);
+                fileList.appendChild(addArea);
+
+                addBtn.addEventListener('click', () => {
+                    if (!addArea.classList.contains('hidden')) {
+                        addArea.classList.add('hidden');
+                        return;
+                    }
+                    editArea.classList.add('hidden');
+                    addArea.classList.remove('hidden');
+                    frontInput.focus();
+                });
+
                 editBtn.addEventListener('click', async () => {
                     if (!editArea.classList.contains('hidden')) {
                         editArea.classList.add('hidden');
                         return;
                     }
+                    addArea.classList.add('hidden');
                     const res = await fetch(`${API}/api/flashcards/file?subject=${sub.subject}&filename=${encodeURIComponent(f.filename)}`);
                     const data = await res.json();
                     ta.value = data.content || '';
@@ -1254,6 +1440,42 @@ function renderFcConfig(subjects) {
         div.appendChild(uploadWrap);
         container.appendChild(div);
     });
+
+    const createRow = document.createElement('div');
+    createRow.className = 'fc-create-subject';
+    const newSubjectInput = document.createElement('input');
+    newSubjectInput.type = 'text';
+    newSubjectInput.className = 'fc-new-subject-input';
+    newSubjectInput.placeholder = 'new subject name';
+    newSubjectInput.spellcheck = false;
+    const createBtn = document.createElement('button');
+    createBtn.className = 'fc-new-subject-btn';
+    createBtn.textContent = '+ subject';
+    const doCreate = async () => {
+        const name = newSubjectInput.value.trim();
+        if (!name) return;
+        createBtn.disabled = true;
+        newSubjectInput.disabled = true;
+        const res = await fetch(`${API}/api/flashcards/subjects`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject: name }),
+        });
+        createBtn.disabled = false;
+        newSubjectInput.disabled = false;
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert(err.error || 'Invalid subject name');
+            return;
+        }
+        newSubjectInput.value = '';
+        loadFcConfig();
+    };
+    createBtn.addEventListener('click', doCreate);
+    newSubjectInput.addEventListener('keydown', e => { if (e.key === 'Enter') doCreate(); });
+    createRow.appendChild(newSubjectInput);
+    createRow.appendChild(createBtn);
+    container.appendChild(createRow);
 }
 
 async function startFcReview(subject, todayCount = 0, dailyGoal = 30) {

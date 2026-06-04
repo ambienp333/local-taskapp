@@ -401,6 +401,13 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
 
 @media (max-width: 900px) {
     #right-panel { display: none; }
+    #right-panel.fc-narrow-active {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 150;
+        background: #1e1e1f;
+    }
     #left-panel {
         flex: 0 0 100vw;
         min-width: 100vw;
@@ -408,9 +415,54 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
     }
 }
 
+#fc-narrow-close {
+    display: none;
+    position: absolute;
+    top: 14px;
+    right: 18px;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.3);
+    cursor: pointer;
+    font-size: 20px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    padding: 0;
+    line-height: 1;
+    z-index: 10;
+}
+#fc-narrow-close:hover { color: #d4d4d4; }
+
+@media (max-width: 900px) {
+    #fc-narrow-close { display: block; }
+}
+
 /* ---- Flashcards ---- */
 
 #screen-flashcards { color: #d4d4d4; }
+
+#fc-sync-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+#fc-resend-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.25);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0;
+    font-family: inherit;
+}
+#fc-resend-btn:hover { color: rgba(255,255,255,0.6); }
+#fc-resend-btn:disabled { opacity: 0.3; cursor: default; }
+
+#fc-resend-status {
+    font-size: 11px;
+    color: rgba(255,255,255,0.3);
+}
 
 .fc-error { font-size: 12px; color: #e57373; }
 
@@ -433,6 +485,24 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
     letter-spacing: 1.2px;
     color: rgba(255,255,255,0.5);
     flex: 1;
+    cursor: pointer;
+}
+.fc-subject-name:hover { color: rgba(255,255,255,0.75); }
+
+.fc-subject-rename-input {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.3);
+    outline: none;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    flex: 1;
+    padding: 0;
+    width: 0;
+    min-width: 0;
 }
 
 .fc-subject-count {
@@ -485,7 +555,7 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
     padding: 0;
 }
 
-.fc-file-edit {
+.fc-file-edit, .fc-file-add {
     background: transparent;
     border: none;
     color: rgba(255,255,255,0.2);
@@ -494,7 +564,26 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
     font-size: 11px;
     padding: 0 4px;
 }
-.fc-file-edit:hover { color: rgba(255,255,255,0.5); }
+.fc-file-edit:hover, .fc-file-add:hover { color: rgba(255,255,255,0.5); }
+
+.fc-add-card-area {
+    margin: 6px 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.fc-card-input {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    outline: none;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    padding: 4px 0;
+    width: 100%;
+}
 
 .fc-edit-area {
     margin: 6px 0 8px;
@@ -547,6 +636,51 @@ body.keyboard-nav .task.selected { background-color: rgba(255,255,255,0.08); }
 .fc-file-del:hover { color: #e57373; }
 
 .fc-upload { margin-top: 4px; }
+
+.fc-subject-del {
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.15);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+    line-height: 1;
+}
+.fc-subject-del:hover { color: #e57373; }
+.fc-subject-del:disabled { opacity: 0.3; cursor: default; }
+
+.fc-create-subject {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 12px;
+}
+
+.fc-new-subject-input {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    outline: none;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    padding: 2px 0;
+    flex: 1;
+}
+
+.fc-new-subject-btn {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    color: rgba(255,255,255,0.3);
+    cursor: pointer;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 11px;
+    padding: 3px 10px;
+    white-space: nowrap;
+}
+.fc-new-subject-btn:hover { color: #d4d4d4; border-color: rgba(255,255,255,0.25); }
+.fc-new-subject-btn:disabled { opacity: 0.3; cursor: default; }
 
 /* Review mode */
 

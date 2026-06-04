@@ -1,0 +1,13 @@
+[Unit]
+Description=Task App Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/task-app
+ExecStart=%h/Documents/task-app/start.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

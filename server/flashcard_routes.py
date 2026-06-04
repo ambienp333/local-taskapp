@@ -1,33 +1,99 @@
 import os
 import re
+import json
+import shutil
 import secrets
+import threading
 from flask import request, jsonify
-from datetime import date, timedelta
-import psycopg2
-import psycopg2.extras
+from datetime import date, datetime, timedelta
 import config
 
-SUBJECTS = ['genetics', 'math', 'biology']
-USER_ID  = 'abel_main_user'
+SUBJECT_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,49}$')
 
 
-def get_conn():
-    return psycopg2.connect(
-        host=os.environ['DB_HOST'],
-        port=5432,
-        database='postgres',
-        user=os.environ['DB_USER'],
-        password=os.environ['DB_PASSWORD'],
-        sslmode='require'
-    )
+# ---- Local storage helpers ----
+
+def load_reviews():
+    if not os.path.exists(config.FC_REVIEWS_FILE):
+        return {}
+    with open(config.FC_REVIEWS_FILE, 'r') as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return {}
+
+
+def save_reviews(data):
+    os.makedirs(config.FC_DIR, exist_ok=True)
+    with open(config.FC_REVIEWS_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def load_fc_config():
+    if not os.path.exists(config.FC_CONFIG_FILE):
+        return {}
+    with open(config.FC_CONFIG_FILE, 'r') as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return {}
+
+
+def save_fc_config(cfg):
+    os.makedirs(config.FC_DIR, exist_ok=True)
+    with open(config.FC_CONFIG_FILE, 'w') as f:
+        json.dump(cfg, f, indent=2)
+
+
+# ---- Async sync pushes ----
+
+def _push_review_async(card_id, record):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_fc_review(card_id, record)
+        except Exception as e:
+            print(f'[sync] fc review push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _push_file_async(subject, filename, content):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_fc_file(subject, filename, content)
+        except Exception as e:
+            print(f'[sync] fc file push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _push_config_async(subject, cfg):
+    def _run():
+        try:
+            import sync_routes
+            sync_routes.push_fc_config(subject, cfg)
+        except Exception as e:
+            print(f'[sync] fc config push failed: {e}')
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ---- Filesystem helpers ----
+
+def _fs_subjects():
+    if not os.path.isdir(config.FC_DIR):
+        return []
+    return sorted([d for d in os.listdir(config.FC_DIR)
+                   if os.path.isdir(os.path.join(config.FC_DIR, d))])
 
 
 def get_fs_files(subject):
     d = os.path.join(config.FC_DIR, subject)
     if not os.path.isdir(d):
         return []
-    return [f for f in os.listdir(d) if f.endswith('.md')]
+    return sorted([f for f in os.listdir(d) if f.endswith('.md')])
 
+
+# ---- Card parsing / ID stamping ----
 
 def is_card(line):
     return bool(re.match(r'^(\s*)-\s+.+(→|>>>)', line))
@@ -76,6 +142,8 @@ def parse_cards(content, subject, filename):
     return cards
 
 
+# ---- SM-2 ----
+
 def sm2(rating, interval, ease_factor, reps):
     if rating < 3:
         new_reps     = 0
@@ -92,126 +160,205 @@ def sm2(rating, interval, ease_factor, reps):
         new_ease = ease_factor + (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02))
         if new_ease < 1.3:
             new_ease = 1.3
-
     due = date.today() + timedelta(days=new_interval)
     return new_interval, new_ease, new_reps, due
 
 
 def register(app):
 
+    @app.route('/api/flashcards/resend', methods=['POST'])
+    def fc_resend():
+        import sync_routes
+        cfg     = load_fc_config()
+        reviews = load_reviews()
+        counts  = {'config': 0, 'files': 0, 'reviews': 0, 'errors': 0}
+
+        for subject, sub_cfg in cfg.items():
+            try:
+                sync_routes.push_fc_config(subject, sub_cfg)
+                counts['config'] += 1
+            except Exception as e:
+                print(f'[resend] config {subject}: {e}')
+                counts['errors'] += 1
+
+        if os.path.isdir(config.FC_DIR):
+            for subject in os.listdir(config.FC_DIR):
+                subj_dir = os.path.join(config.FC_DIR, subject)
+                if not os.path.isdir(subj_dir):
+                    continue
+                for filename in os.listdir(subj_dir):
+                    if not filename.endswith('.md'):
+                        continue
+                    try:
+                        with open(os.path.join(subj_dir, filename), 'r') as f:
+                            content = f.read()
+                        sync_routes.push_fc_file(subject, filename, content)
+                        counts['files'] += 1
+                    except Exception as e:
+                        print(f'[resend] file {subject}/{filename}: {e}')
+                        counts['errors'] += 1
+
+        for card_id, record in reviews.items():
+            try:
+                sync_routes.push_fc_review(card_id, record)
+                counts['reviews'] += 1
+            except Exception as e:
+                print(f'[resend] review {card_id}: {e}')
+                counts['errors'] += 1
+
+        return jsonify({'ok': True, **counts})
+
+    @app.route('/api/flashcards/card', methods=['POST'])
+    def fc_card_add():
+        data     = request.json
+        subject  = data.get('subject')
+        filename = data.get('filename')
+        front    = (data.get('front') or '').strip()
+        back     = (data.get('back') or '').strip()
+
+        if not subject or not SUBJECT_RE.match(subject):
+            return jsonify({'error': 'Invalid subject'}), 400
+        if not filename:
+            return jsonify({'error': 'filename required'}), 400
+        if not front:
+            return jsonify({'error': 'front required'}), 400
+
+        card_id  = secrets.token_hex(4)
+        new_card = f'\n<!-- id: {card_id} -->\n- {front} → {back}\n'
+        fs_path  = os.path.join(config.FC_DIR, subject, filename)
+        if not os.path.isfile(fs_path):
+            return jsonify({'error': 'File not found'}), 404
+        with open(fs_path, 'r') as f:
+            content = f.read()
+        updated = content.rstrip('\n') + new_card
+        with open(fs_path, 'w') as f:
+            f.write(updated)
+
+        _push_file_async(subject, filename, updated)
+        return jsonify({'ok': True, 'id': card_id})
+
+    @app.route('/api/flashcards/subjects', methods=['POST'])
+    def fc_subject_create():
+        subject = (request.json.get('subject') or '').strip()
+        if not subject or not SUBJECT_RE.match(subject):
+            return jsonify({'error': 'Invalid subject name (alphanumeric, _ and - only)'}), 400
+        os.makedirs(os.path.join(config.FC_DIR, subject), exist_ok=True)
+        cfg = load_fc_config()
+        if subject not in cfg:
+            cfg[subject] = {'enabled': True, 'daily_goal': 30, 'files': {}}
+            save_fc_config(cfg)
+        _push_config_async(subject, cfg[subject])
+        return jsonify({'ok': True, 'subject': subject}), 201
+
+    @app.route('/api/flashcards/subjects/<subject>', methods=['PATCH'])
+    def fc_subject_rename(subject):
+        if not SUBJECT_RE.match(subject):
+            return jsonify({'error': 'Invalid subject name'}), 400
+        new_name = (request.json.get('name') or '').strip()
+        if not new_name or not SUBJECT_RE.match(new_name):
+            return jsonify({'error': 'Invalid new subject name (alphanumeric, _ and - only)'}), 400
+        if new_name == subject:
+            return jsonify({'ok': True})
+
+        old_dir = os.path.join(config.FC_DIR, subject)
+        new_dir = os.path.join(config.FC_DIR, new_name)
+        if os.path.isdir(old_dir):
+            os.rename(old_dir, new_dir)
+
+        cfg = load_fc_config()
+        cfg[new_name] = cfg.pop(subject, {'enabled': True, 'daily_goal': 30, 'files': {}})
+        save_fc_config(cfg)
+
+        reviews = load_reviews()
+        for r in reviews.values():
+            if r.get('subject') == subject:
+                r['subject'] = new_name
+        save_reviews(reviews)
+
+        _push_config_async(new_name, cfg[new_name])
+        return jsonify({'ok': True, 'subject': new_name})
+
+    @app.route('/api/flashcards/subjects/<subject>', methods=['DELETE'])
+    def fc_subject_delete(subject):
+        if not SUBJECT_RE.match(subject):
+            return jsonify({'error': 'Invalid subject name'}), 400
+        subj_dir = os.path.join(config.FC_DIR, subject)
+        if os.path.isdir(subj_dir):
+            shutil.rmtree(subj_dir)
+        cfg = load_fc_config()
+        cfg.pop(subject, None)
+        save_fc_config(cfg)
+        reviews = load_reviews()
+        pruned = {k: v for k, v in reviews.items() if v.get('subject') != subject}
+        save_reviews(pruned)
+        return jsonify({'ok': True})
+
     @app.route('/api/flashcards/config', methods=['GET'])
     def fc_config_get():
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM public.flashcard_config WHERE user_id = %s", (USER_ID,))
-                config_rows = cur.fetchall()
+        cfg      = load_fc_config()
+        reviews  = load_reviews()
+        subjects = set(_fs_subjects()) | set(cfg.keys())
 
-                cur.execute("""
-                    SELECT subject, COUNT(*) as count
-                    FROM public.flashcard_reviews
-                    WHERE user_id = %s
-                      AND reviewed_at >= date_trunc('day', NOW() AT TIME ZONE 'America/Denver')
-                                        AT TIME ZONE 'America/Denver'
-                    GROUP BY subject
-                """, (USER_ID,))
-                today_rows = cur.fetchall()
+        today_str = date.today().isoformat()
+        count_map = {}
+        for r in reviews.values():
+            subj = r.get('subject', '')
+            if (r.get('reviewed_at') or '')[:10] == today_str:
+                count_map[subj] = count_map.get(subj, 0) + 1
 
-                cur.execute("SELECT * FROM public.flashcard_file_config WHERE user_id = %s", (USER_ID,))
-                file_config_rows = cur.fetchall()
-
-                cur.execute("SELECT subject, filename FROM public.flashcard_files WHERE user_id = %s", (USER_ID,))
-                db_files_rows = cur.fetchall()
-
-            config_map = {r['subject']: r for r in config_rows}
-            count_map  = {r['subject']: int(r['count']) for r in today_rows}
-
-            file_config_map = {}
-            for r in file_config_rows:
-                file_config_map.setdefault(r['subject'], {})[r['filename']] = r['enabled']
-
-            db_files_by_subject = {}
-            for r in db_files_rows:
-                db_files_by_subject.setdefault(r['subject'], []).append(r['filename'])
-
-            result = []
-            for subject in SUBJECTS:
-                fs_names = get_fs_files(subject)
-                db_names = db_files_by_subject.get(subject, [])
-                all_names = list(dict.fromkeys(fs_names + db_names))
-
-                fc_map = file_config_map.get(subject, {})
-                files = [{
-                    'filename': fn,
-                    'enabled':  fc_map.get(fn, True),
-                    'source':   'filesystem' if fn in fs_names else 'uploaded',
-                } for fn in all_names]
-
-                cfg = config_map.get(subject)
-                result.append({
-                    'subject':     subject,
-                    'enabled':     cfg['enabled']    if cfg else True,
-                    'daily_goal':  cfg['daily_goal'] if cfg else 30,
-                    'today_count': count_map.get(subject, 0),
-                    'files':       files,
-                })
-
-            return jsonify(result)
-        finally:
-            conn.close()
+        result = []
+        for subject in sorted(subjects):
+            fs_names = get_fs_files(subject)
+            sub_cfg  = cfg.get(subject, {})
+            file_cfg = sub_cfg.get('files', {})
+            files    = [{'filename': fn, 'enabled': file_cfg.get(fn, True)} for fn in fs_names]
+            result.append({
+                'subject':     subject,
+                'enabled':     sub_cfg.get('enabled', True),
+                'daily_goal':  sub_cfg.get('daily_goal', 30),
+                'today_count': count_map.get(subject, 0),
+                'files':       files,
+            })
+        return jsonify(result)
 
     @app.route('/api/flashcards/config', methods=['PATCH'])
     def fc_config_patch():
         data    = request.json
         subject = data.get('subject')
-        if subject not in SUBJECTS:
+        if not subject or not SUBJECT_RE.match(subject):
             return jsonify({'error': 'Invalid subject'}), 400
 
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                if 'filename' in data:
-                    cur.execute("""
-                        INSERT INTO public.flashcard_file_config (user_id, subject, filename, enabled)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (user_id, subject, filename)
-                        DO UPDATE SET enabled = EXCLUDED.enabled
-                    """, (USER_ID, subject, data['filename'], data.get('file_enabled', True)))
-                else:
-                    cur.execute("""
-                        INSERT INTO public.flashcard_config (user_id, subject, enabled, daily_goal)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (user_id, subject)
-                        DO UPDATE SET enabled = EXCLUDED.enabled, daily_goal = EXCLUDED.daily_goal
-                    """, (USER_ID, subject, data.get('enabled', True), data.get('daily_goal', 30)))
-            conn.commit()
-            return jsonify({'ok': True})
-        finally:
-            conn.close()
+        cfg = load_fc_config()
+        sub = cfg.setdefault(subject, {'enabled': True, 'daily_goal': 30, 'files': {}})
+
+        if 'filename' in data:
+            sub.setdefault('files', {})[data['filename']] = data.get('file_enabled', True)
+        else:
+            if 'enabled'    in data: sub['enabled']    = data['enabled']
+            if 'daily_goal' in data: sub['daily_goal'] = data['daily_goal']
+
+        save_fc_config(cfg)
+        _push_config_async(subject, sub)
+        return jsonify({'ok': True})
 
     @app.route('/api/flashcards/config', methods=['DELETE'])
     def fc_config_delete():
         data     = request.json
         subject  = data.get('subject')
         filename = data.get('filename')
-        if subject not in SUBJECTS:
+        if not subject or not SUBJECT_RE.match(subject):
             return jsonify({'error': 'Invalid subject'}), 400
         if not filename:
             return jsonify({'error': 'filename is required'}), 400
 
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM public.flashcard_files WHERE user_id=%s AND subject=%s AND filename=%s",
-                    (USER_ID, subject, filename))
-                cur.execute(
-                    "DELETE FROM public.flashcard_file_config WHERE user_id=%s AND subject=%s AND filename=%s",
-                    (USER_ID, subject, filename))
-            conn.commit()
-            return jsonify({'ok': True})
-        finally:
-            conn.close()
+        fs_path = os.path.join(config.FC_DIR, subject, filename)
+        if os.path.isfile(fs_path):
+            os.remove(fs_path)
+
+        cfg = load_fc_config()
+        cfg.get(subject, {}).get('files', {}).pop(filename, None)
+        save_fc_config(cfg)
+        return jsonify({'ok': True})
 
     @app.route('/api/flashcards/upload', methods=['POST'])
     def fc_upload():
@@ -220,7 +367,7 @@ def register(app):
         filename = data.get('filename')
         content  = data.get('content')
 
-        if subject not in SUBJECTS:
+        if not subject or not SUBJECT_RE.match(subject):
             return jsonify({'error': 'Invalid subject'}), 400
         if not filename:
             return jsonify({'error': 'filename is required'}), 400
@@ -228,20 +375,13 @@ def register(app):
             return jsonify({'error': 'content is required'}), 400
 
         processed, added = add_ids(content)
+        subj_dir = os.path.join(config.FC_DIR, subject)
+        os.makedirs(subj_dir, exist_ok=True)
+        with open(os.path.join(subj_dir, filename), 'w') as f:
+            f.write(processed)
 
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO public.flashcard_files (user_id, subject, filename, content, uploaded_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (user_id, subject, filename)
-                    DO UPDATE SET content = EXCLUDED.content, uploaded_at = NOW()
-                """, (USER_ID, subject, filename, processed))
-            conn.commit()
-            return jsonify({'ok': True, 'added': added, 'filename': filename})
-        finally:
-            conn.close()
+        _push_file_async(subject, filename, processed)
+        return jsonify({'ok': True, 'added': added, 'filename': filename})
 
     @app.route('/api/flashcards/review', methods=['POST'])
     def fc_review():
@@ -255,138 +395,93 @@ def register(app):
         if not (0 <= rating <= 5):
             return jsonify({'error': 'rating must be 0-5'}), 400
 
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM public.flashcard_reviews WHERE user_id=%s AND card_id=%s",
-                    (USER_ID, card_id))
-                prev = cur.fetchone()
+        reviews  = load_reviews()
+        prev     = reviews.get(card_id, {})
 
-                prev_interval = prev['interval']    if prev else 0
-                prev_ease     = float(prev['ease_factor']) if prev else 2.5
-                prev_reps     = prev['reps']         if prev else 0
-                prev_seen     = prev['seen']          if prev else 0
+        interval, ease_factor, reps, due = sm2(
+            rating,
+            prev.get('interval',    0),
+            float(prev.get('ease_factor', 2.5)),
+            prev.get('reps',        0),
+        )
 
-                interval, ease_factor, reps, due = sm2(rating, prev_interval, prev_ease, prev_reps)
+        record = {
+            'subject':     subject,
+            'interval':    interval,
+            'ease_factor': ease_factor,
+            'reps':        reps,
+            'due_date':    due.isoformat(),
+            'seen':        prev.get('seen', 0) + 1,
+            'reviewed_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        reviews[card_id] = record
+        save_reviews(reviews)
 
-                cur.execute("""
-                    INSERT INTO public.flashcard_reviews
-                      (user_id, card_id, subject, interval, ease_factor, reps, due_date, seen, reviewed_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (user_id, card_id) DO UPDATE SET
-                      subject = EXCLUDED.subject,
-                      interval = EXCLUDED.interval,
-                      ease_factor = EXCLUDED.ease_factor,
-                      reps = EXCLUDED.reps,
-                      due_date = EXCLUDED.due_date,
-                      seen = flashcard_reviews.seen + 1,
-                      reviewed_at = NOW()
-                """, (USER_ID, card_id, subject, interval, ease_factor, reps,
-                      due.isoformat(), prev_seen + 1))
-            conn.commit()
-            return jsonify({'ok': True, 'interval': interval, 'ease_factor': ease_factor,
-                            'reps': reps, 'due_date': due.isoformat()})
-        finally:
-            conn.close()
+        _push_review_async(card_id, record)
+        return jsonify({'ok': True, 'interval': interval, 'ease_factor': ease_factor,
+                        'reps': reps, 'due_date': due.isoformat()})
 
     @app.route('/api/flashcards/file', methods=['GET'])
     def fc_file_get():
         subject  = request.args.get('subject')
         filename = request.args.get('filename')
-        if subject not in SUBJECTS:
+        if not subject or not SUBJECT_RE.match(subject):
             return jsonify({'error': 'Invalid subject'}), 400
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT content FROM public.flashcard_files WHERE user_id=%s AND subject=%s AND filename=%s",
-                    (USER_ID, subject, filename))
-                row = cur.fetchone()
-            if not row:
-                return jsonify({'error': 'Not found'}), 404
-            return jsonify({'content': row['content']})
-        finally:
-            conn.close()
+        fs_path = os.path.join(config.FC_DIR, subject, filename)
+        if not os.path.isfile(fs_path):
+            return jsonify({'error': 'Not found'}), 404
+        with open(fs_path, 'r') as f:
+            content = f.read()
+        return jsonify({'content': content})
 
     @app.route('/api/flashcards/cards', methods=['GET'])
     def fc_cards():
         subject = request.args.get('subject')
-        if subject not in SUBJECTS:
+        if not subject or not SUBJECT_RE.match(subject):
             return jsonify({'error': 'Invalid subject'}), 400
 
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT filename, enabled FROM public.flashcard_file_config
-                    WHERE user_id=%s AND subject=%s
-                """, (USER_ID, subject))
-                file_cfg = {r['filename']: r['enabled'] for r in cur.fetchall()}
+        cfg      = load_fc_config()
+        reviews  = load_reviews()
+        file_cfg = cfg.get(subject, {}).get('files', {})
+        today    = date.today()
 
-                cur.execute("""
-                    SELECT f.filename, f.content
-                    FROM public.flashcard_files f
-                    LEFT JOIN public.flashcard_file_config fc
-                      ON fc.user_id=f.user_id AND fc.subject=f.subject AND fc.filename=f.filename
-                    WHERE f.user_id=%s AND f.subject=%s AND COALESCE(fc.enabled, true)=true
-                """, (USER_ID, subject))
-                db_files = list(cur.fetchall())
+        all_cards = []
+        seen_ids  = set()
 
-                cur.execute("""
-                    SELECT card_id, interval, ease_factor, reps, due_date, seen
-                    FROM public.flashcard_reviews WHERE user_id=%s AND subject=%s
-                """, (USER_ID, subject))
-                reviews = {r['card_id']: r for r in cur.fetchall()}
+        def enrich(card):
+            rev = reviews.get(card['id'])
+            if rev:
+                due = date.fromisoformat(rev['due_date'])
+                card['due_date'] = rev['due_date']
+                card['reps']     = rev['reps']
+                card['seen']     = rev['seen']
+                card['is_due']   = due <= today
+            else:
+                card['due_date'] = None
+                card['reps']     = 0
+                card['seen']     = 0
+                card['is_due']   = True
+            return card
 
-            today     = date.today()
-            all_cards = []
-            seen_ids  = set()
-
-            def enrich(card):
-                review = reviews.get(card['id'])
-                if review:
-                    due = review['due_date']
-                    if hasattr(due, 'date'):
-                        due = due.date()
-                    card['due_date'] = due.isoformat()
-                    card['reps']     = review['reps']
-                    card['seen']     = review['seen']
-                    card['is_due']   = due <= today
-                else:
-                    card['due_date'] = None
-                    card['reps']     = 0
-                    card['seen']     = 0
-                    card['is_due']   = True
-                return card
-
-            for row in db_files:
-                for card in parse_cards(row['content'], subject, row['filename']):
+        fs_dir = os.path.join(config.FC_DIR, subject)
+        if os.path.isdir(fs_dir):
+            for fname in sorted(os.listdir(fs_dir)):
+                if not fname.endswith('.md') or not file_cfg.get(fname, True):
+                    continue
+                with open(os.path.join(fs_dir, fname)) as f:
+                    content = f.read()
+                for card in parse_cards(content, subject, fname):
                     if card['id'] not in seen_ids:
                         seen_ids.add(card['id'])
                         all_cards.append(enrich(card))
 
-            fs_dir = os.path.join(config.FC_DIR, subject)
-            if os.path.isdir(fs_dir):
-                for fname in os.listdir(fs_dir):
-                    if not fname.endswith('.md') or not file_cfg.get(fname, True):
-                        continue
-                    with open(os.path.join(fs_dir, fname)) as f:
-                        content_fs = f.read()
-                    for card in parse_cards(content_fs, subject, fname):
-                        if card['id'] not in seen_ids:
-                            seen_ids.add(card['id'])
-                            all_cards.append(enrich(card))
-
-            due_cards = [c for c in all_cards if c['is_due']]
-            return jsonify({
-                'due':   due_cards,
-                'all':   all_cards,
-                'stats': {
-                    'due':   len(due_cards),
-                    'seen':  sum(1 for c in all_cards if c['seen'] > 0),
-                    'total': len(all_cards),
-                },
-            })
-        finally:
-            conn.close()
+        due_cards = [c for c in all_cards if c['is_due']]
+        return jsonify({
+            'due':   due_cards,
+            'all':   all_cards,
+            'stats': {
+                'due':   len(due_cards),
+                'seen':  sum(1 for c in all_cards if c['seen'] > 0),
+                'total': len(all_cards),
+            },
+        })
