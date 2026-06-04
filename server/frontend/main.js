@@ -59,23 +59,25 @@ function getSubtasks(notes) {
     if (!notes) return [];
     return notes.split('\n')
         .map((line, idx) => ({ line, idx }))
-        .filter(({ line }) => /^- /.test(line))
-        .map(({ line, idx }) => ({
-            rawIdx: idx,
-            text: line.replace(/^- (\[.\] )?/, ''),
-            done: /^- \[x\] /i.test(line),
-        }));
+        .filter(({ line }) => /^\s*(\[ \]|\[x\]|- )/.test(line))
+        .map(({ line, idx }) => {
+            const t = line.trimStart();
+            return {
+                rawIdx: idx,
+                text: t.replace(/^(\[.\] |- \[.\] |- )/, ''),
+                done: /^\[x\] /i.test(t) || /^- \[x\] /i.test(t),
+            };
+        })
+        .filter(({ text }) => text.trim().length > 0);
 }
 
 async function toggleSubtask(task, rawIdx) {
     const lines = (task.notes || '').split('\n');
-    const line = lines[rawIdx];
-    if (/^- \[x\] /i.test(line)) {
-        lines[rawIdx] = line.replace(/^- \[x\] /i, '- [ ] ');
-    } else if (/^- \[ \] /.test(line)) {
-        lines[rawIdx] = line.replace(/^- \[ \] /, '- [x] ');
+    const ln = lines[rawIdx].trimStart();
+    if (/^(\[x\] |- \[x\] )/i.test(ln)) {
+        lines[rawIdx] = '[ ] ' + ln.replace(/^(\[x\] |- \[x\] )/i, '');
     } else {
-        lines[rawIdx] = line.replace(/^- /, '- [x] ');
+        lines[rawIdx] = '[x] ' + ln.replace(/^(\[ \] |- \[ \] |- )/, '');
     }
     const notes = lines.join('\n');
     task.notes = notes;
@@ -189,13 +191,27 @@ function completeFcTask(subject) {
     fetch(`${API}/api/tasks`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id }) });
 }
 
-async function saveNotes() {
+function convertSubtaskLines(text) {
+    return text.split('\n').map(line => {
+        const t = line.trimStart();
+        if (/^- \[x\] /i.test(t)) return '[x] ' + t.slice(6);
+        if (/^- \[ \] /.test(t))  return '[ ] ' + t.slice(6);
+        if (t.startsWith('- ') && t.length > 2) return '[ ] ' + t.slice(2);
+        return line;
+    }).join('\n');
+}
+
+function saveNotes(notes) {
     if (!state.selectedTask) return;
-    const textarea = isNarrow()
-        ? document.getElementById('notes-overlay-input')
-        : document.getElementById('notes-area');
-    if (!textarea) return;
-    const notes = textarea.value;
+    if (notes === undefined) {
+        const overlayVisible = !document.getElementById('notes-overlay').classList.contains('hidden');
+        if (isNarrow() && !overlayVisible) return;
+        const ta = isNarrow()
+            ? document.getElementById('notes-overlay-input')
+            : document.getElementById('notes-area');
+        if (!ta) return;
+        notes = ta.value;
+    }
     if (notes === (state.selectedTask.notes || '')) return;
     state.selectedTask.notes = notes;
     const t = state.tasks[state.view]?.find(t => t.id === state.selectedTask.id);
@@ -205,6 +221,15 @@ async function saveNotes() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: state.selectedTask.id, notes }),
     });
+}
+
+function commitNotes(ta) {
+    if (!state.selectedTask || !ta) return;
+    const converted = convertSubtaskLines(ta.value);
+    if (converted !== ta.value) ta.value = converted;
+    saveNotes(ta.value);
+    updateNotesPanel();
+    render();
 }
 
 // ---- Render ----
@@ -459,22 +484,15 @@ async function submitTask() {
 
 function showNotesOverlay() {
     if (!state.selectedTask) return;
+    clearTimeout(deselectTimer);
     const textarea = document.getElementById('notes-overlay-input');
     textarea.value = state.selectedTask.notes || '';
     document.getElementById('notes-overlay').classList.remove('hidden');
     textarea.focus();
 }
 
-document.getElementById('save-notes-btn').addEventListener('click', async () => {
-    const notes = document.getElementById('notes-overlay-input').value;
-    if (state.selectedTask) {
-        state.selectedTask.notes = notes;
-        await fetch(`${API}/api/tasks`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: state.selectedTask.id, notes }),
-        });
-    }
+document.getElementById('save-notes-btn').addEventListener('click', () => {
+    commitNotes(document.getElementById('notes-overlay-input'));
     document.getElementById('notes-overlay').classList.add('hidden');
 });
 
@@ -485,19 +503,25 @@ document.getElementById('close-notes-btn').addEventListener('click', () => {
 document.getElementById('notes-overlay-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.shiftKey) {
         e.preventDefault();
-        const notes = document.getElementById('notes-overlay-input').value;
-        if (state.selectedTask) {
-            state.selectedTask.notes = notes;
-            const t = state.tasks[state.view]?.find(t => t.id === state.selectedTask.id);
-            if (t) t.notes = notes;
-            fetch(`${API}/api/tasks`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: state.selectedTask.id, notes }),
-            });
-        }
+        commitNotes(document.getElementById('notes-overlay-input'));
         document.getElementById('notes-overlay').classList.add('hidden');
         deselectTask();
+        return;
+    }
+    if (e.key !== 'Enter') return;
+    const ta = e.target;
+    const pos = ta.selectionStart;
+    const currentLine = ta.value.substring(0, pos).split('\n').at(-1);
+    if (/^(\[ \] )?$/.test(currentLine)) {
+        e.preventDefault();
+        const lineStart = pos - currentLine.length;
+        ta.value = ta.value.substring(0, lineStart) + ta.value.substring(pos);
+        ta.selectionStart = ta.selectionEnd = lineStart;
+    } else if (/^(\[ \] |\[x\] |- )/.test(currentLine)) {
+        e.preventDefault();
+        const insert = '\n[ ] ';
+        ta.value = ta.value.substring(0, pos) + insert + ta.value.substring(pos);
+        ta.selectionStart = ta.selectionEnd = pos + insert.length;
     }
 });
 
@@ -506,37 +530,29 @@ document.getElementById('notes-area').addEventListener('focus', () => {
 });
 
 document.getElementById('notes-area').addEventListener('blur', () => {
-    if (!isNarrow()) saveNotes();
-});
-
-document.getElementById('notes-area').addEventListener('input', () => {
-    if (!state.selectedTask) return;
-    const notes = document.getElementById('notes-area').value;
-    state.selectedTask.notes = notes;
-    const t = state.tasks[state.view]?.find(t => t.id === state.selectedTask.id);
-    if (t) t.notes = notes;
-    render();
+    if (isNarrow() || !state.selectedTask) return;
+    commitNotes(document.getElementById('notes-area'));
 });
 
 document.getElementById('notes-area').addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
     if (e.shiftKey) {
         e.preventDefault();
-        document.getElementById('notes-area').blur();
+        commitNotes(document.getElementById('notes-area'));
         deselectTask();
         return;
     }
     const ta = e.target;
     const pos = ta.selectionStart;
     const currentLine = ta.value.substring(0, pos).split('\n').at(-1);
-    if (/^- $/.test(currentLine)) {
+    if (/^(\[ \] )?$/.test(currentLine)) {
         e.preventDefault();
         const lineStart = pos - currentLine.length;
         ta.value = ta.value.substring(0, lineStart) + ta.value.substring(pos);
         ta.selectionStart = ta.selectionEnd = lineStart;
-    } else if (/^- /.test(currentLine)) {
+    } else if (/^(\[ \] |\[x\] |- )/.test(currentLine)) {
         e.preventDefault();
-        const insert = '\n- ';
+        const insert = '\n[ ] ';
         ta.value = ta.value.substring(0, pos) + insert + ta.value.substring(pos);
         ta.selectionStart = ta.selectionEnd = pos + insert.length;
     }
